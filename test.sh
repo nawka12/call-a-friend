@@ -12,6 +12,7 @@ cat > "$T/bin/ssh" <<EOF
 #!/usr/bin/env bash
 while [[ \$1 == -* ]]; do [[ \$1 == -o ]] && shift; shift; done
 shift
+[[ -e "$T/login" ]] && { echo '# Tailscale SSH requires an additional check.' >&2; echo '# To authenticate, visit: https://login.example/a/1' >&2; exec sleep 30; }
 cd "$T/friend" && HOME="$T/friend" exec setsid sh -c "\$*"
 EOF
 chmod +x "$T/bin/ssh"
@@ -49,6 +50,14 @@ rc=0
 [[ $rc == 75 ]] || fail "busy friend gave $rc"
 "$caf" status | grep -q '^busy: ' || fail "status doesn't report busy"
 sed -i '/min_mem_gb/d' .caf
+
+# a pending Tailscale login is reported without its link instead of hanging
+touch "$T/login"
+rc=0
+err=$(timeout 10 "$caf" status 2>&1 > /dev/null) || rc=$?
+[[ $rc == 76 ]] || fail "pending login gave $rc: $err"
+[[ $err != *https://* ]] || fail "login link leaked: $err"
+rm "$T/login"
 
 # hanging up stops the remote command
 set -m

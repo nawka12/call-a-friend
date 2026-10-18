@@ -6,6 +6,7 @@ Run heavy builds on your other machine while you keep working on the laptop.
 caf run -- tools/bazel run //common:kernel_aarch64_dist
 ```
 
+0. **Login check.** If Tailscale wants a login and there's no terminal to show its link on (for example when Claude runs caf), caf exits with status 76 instead of hanging. You then log in yourself by connecting once (`ssh <host> true`).
 1. **Busy check.** caf checks the friend's load and free RAM. If the friend is busy, it shows the biggest processes and asks which ones to kill. Without a terminal to ask on, it exits with status 75.
 2. **Push.** The project is rsynced to `~/.cache/call-a-friend/<project>-<hash>` on the friend. Files ignored by `.gitignore` or `exclude=` are skipped, and the friend's own build outputs are kept, so incremental builds still work.
 3. **Run.** The command runs there. Output streams back with remote paths rewritten to local ones. If you hang up (Ctrl-C, the job is killed, the connection drops), the remote command is stopped too.

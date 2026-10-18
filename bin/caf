@@ -25,7 +25,8 @@ Config files hold key=value lines; '#' starts a comment.
   min_mem_gb=8             the friend is busy with less free RAM than this
   ttl_days=3               delete copies unused this long; copies from before a reboot always go
 
-Exit status is the command's, or 75 when the friend is busy (-f runs anyway).
+Exit status is the command's, 75 when the friend is busy (-f runs anyway), or
+76 when Tailscale wants a login and there is no terminal to show its link on.
 EOF
 }
 
@@ -97,6 +98,22 @@ remote() {  # remote <posix sh script>: runs it on the friend whatever its login
   ssh "${ssh_opts[@]}" "$host" "sh -c 'eval \"\$(echo $(printf '%s' "$1" | base64 -w0) | base64 -d)\"'"
 }
 
+connect() {  # open the shared connection; if Tailscale wants a login, say so instead of hanging on it
+  local err pid login='requires an additional check'
+  err=$(mktemp)
+  ssh "${ssh_opts[@]}" "$host" true < /dev/null 2> "$err" &
+  pid=$!
+  while kill -0 "$pid" 2> /dev/null && ! grep -q "$login" "$err"; do sleep 0.2; done
+  if grep -q "$login" "$err"; then
+    kill "$pid" 2> /dev/null || true
+    rm -f "$err"
+    echo "caf: $host wants a Tailscale login; connect once yourself (ssh $host true), then rerun" >&2
+    exit 76
+  fi
+  wait "$pid" || { cat "$err" >&2; rm -f "$err"; die "can't reach $host"; }
+  rm -f "$err"
+}
+
 friend() {  # preflight; sets rhome cores load memtotal memavail procs busy
   local out k v
   out=$(remote "ws=$(q "$ws") ttl=${conf[ttl_days]}
@@ -155,6 +172,7 @@ if [[ $root ]]; then
 fi
 ssh_opts=(-o ConnectTimeout=10 -o ControlMaster=auto -o "ControlPath=${XDG_RUNTIME_DIR:-/tmp}/caf-%C" -o ControlPersist=60)
 [[ -t 0 ]] || ssh_opts+=(-o BatchMode=yes)
+[[ -t 2 ]] || connect  # with a terminal, ssh shows the login link and waits for it
 need_root() { [[ $root ]] || die "no .caf in $PWD or its parents; create one at the project root"; }
 
 case $cmd in

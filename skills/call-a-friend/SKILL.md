@@ -37,6 +37,10 @@ description: Run heavy commands (kernel and Android builds, LTO/ThinLTO links, b
 
 If the user declines everything, don't run.
 
+## When Tailscale wants a login (exit status 76)
+
+Nothing ran. Tell the user that the friend needs a Tailscale login, and that they should connect once themselves, for example by running `ssh <host> true` in a terminal and opening the link it prints. Don't try to log in or get the link yourself. Rerun once they say they're done.
+
 ## Other commands
 
 - `caf status` shows the friend's load, RAM and top processes.
