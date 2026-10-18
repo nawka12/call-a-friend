@@ -16,6 +16,7 @@ The friend only holds the code in transit. Copies from before a reboot, or unuse
 
 ## Setup
 
+- Linux on both machines (WSL2 counts). macOS and native Windows aren't supported.
 - On both machines: `rsync`.
 - On the friend: key-based ssh access (Tailscale works).
 - The toolchain must be installed on the friend, unless it ships inside the tree, as it does in Android kernel checkouts.
