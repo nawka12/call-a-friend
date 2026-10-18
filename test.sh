@@ -19,7 +19,8 @@ chmod +x "$T/bin/ssh"
 export PATH="$T/bin:$PATH" XDG_CONFIG_HOME="$T/cfg"
 echo 'host=fake' > "$T/cfg/call-a-friend/config"
 cd "$T/proj"
-printf 'exclude=/out/\npull=/out/**   # artifacts\n' > .caf
+printf 'exclude=/out/\npull=/out/**   # artifacts\nmirror=../tc\n' > .caf
+mkdir -p "$T/tc" && echo clang > "$T/tc/clang"
 echo '*.o' > .gitignore
 echo 'int main;' > src.c
 touch local.o
@@ -33,6 +34,8 @@ out=$("$caf" run -f -- 'ls; echo "$PWD/src.c:1: error"; mkdir -p out; echo built
 [[ $out == *"$T/proj/src.c:1: error"* ]] || fail "path not mapped: $out"
 [[ $out != *local.o* ]] || fail "gitignored file was pushed: $out"
 [[ $(cat out/bin) == built ]] || fail "artifact not pulled"
+[[ $out == *"caf: pushed $T/tc in "* && $out == *"caf: pushed $T/proj in "* ]] || fail "no push summaries: $out"
+[[ $out == *"caf: pulled artifacts in "*" (1 file, sent "* ]] || fail "no pull summary: $out"
 [[ ! -e $T/friend/.cache/call-a-friend/stale-1 ]] || fail "stale copy not pruned"
 
 # --delete mirrors local deletions but keeps the friend's ignored build outputs

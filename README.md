@@ -34,6 +34,8 @@ exclude=/.repo/
 pull=/out/*/dist/**
 ```
 
+If the build needs a folder outside the project, such as a toolchain beside it, add `mirror=../toolchain`. caf pushes it to the same absolute path on the friend, so hard-coded paths in build scripts keep working. Mirrors are the one exception to "transit only": they stay on the friend, and caf only adds or updates files in them, never deletes.
+
 Run `caf --help` for every key and command.
 
 ## Claude Code plugin

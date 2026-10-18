@@ -18,6 +18,8 @@ description: Run heavy commands (kernel and Android builds, LTO/ThinLTO links, b
   pull=/out/*/dist/**
   ```
 
+- If the build needs a folder outside the project root, such as a toolchain in `../toolchain` that build scripts refer to by absolute path, add `mirror=../toolchain`. It's pushed to the same absolute path on the friend and stays there between runs.
+
 ## Running
 
 - Use `caf run -- <command>` from anywhere inside the project. The command runs from the project root on the friend, under bash.

@@ -21,6 +21,8 @@ Config files hold key=value lines; '#' starts a comment.
   pull=/out/*/dist/**      copy matching files back after the run (rsync pattern, repeatable)
   exclude=/out/            don't push these (repeatable; .gitignore'd files are skipped too)
   include=/common/.config  push these even if excluded or ignored (repeatable)
+  mirror=../toolchain      also push this folder (relative to the project root, or absolute) to the
+                           same absolute path on the friend; it stays there (repeatable, never deleted)
   max_load=0.5             the friend is busy above this 1-minute load per core
   min_mem_gb=8             the friend is busy with less free RAM than this
   ttl_days=3               delete copies unused this long; copies from before a reboot always go
@@ -71,7 +73,7 @@ wait "$pid"
 EOF
 
 declare -A conf=([max_load]=0.5 [min_mem_gb]=8 [ttl_days]=3)
-includes=() excludes=() pulls=()
+includes=() excludes=() pulls=() mirrors=()
 
 load_conf() {  # load_conf <file> [global]
   local k v n=0
@@ -89,6 +91,7 @@ load_conf() {  # load_conf <file> [global]
       include) includes+=("+ $v") ;;
       exclude) excludes+=("- $v") ;;
       pull) pulls+=("+ $v") ;;
+      mirror) mirrors+=("$v") ;;
       *) die "$1:$n: unknown key '$k'" ;;
     esac
   done < "$1"
@@ -144,6 +147,21 @@ kill_pids() {
   remote "kill $*" < /dev/null
 }
 
+xfer() {  # xfer <pushed|pulled> <what> <rsync args...>: rsync between a start and a summary line
+  local verb=$1 what=$2 t=$SECONDS stats=
+  shift 2
+  echo "caf: ${verb%ed}ing $what" >&2
+  if [[ -t 2 ]]; then
+    rsync --info=progress2 "$@" >&2 || return
+  else
+    stats=$(rsync --stats -h "$@") || return
+  fi
+  echo "caf: $verb $what in $((SECONDS - t))s$(awk -F': ' '
+    /^Number of regular files transferred/ { f = $2 }
+    /^Total bytes (sent|received)/ { b = b ", " substr($1, 13) " " $2 }
+    END { if (f != "") printf " (%s file%s%s)", f, f == "1" ? "" : "s", b }' <<< "$stats")" >&2
+}
+
 cmd=${1:-}
 shift || true
 case $cmd in
@@ -180,6 +198,11 @@ case $cmd in
     friend
     show
     [[ -z $busy ]] || echo "busy: $busy"
+    via=$(tailscale ping -c 1 --timeout 3s "$(ssh -G "$host" | awk '$1 == "hostname" { print $2 }')" 2> /dev/null | grep -o 'via .*') || true
+    case $via in
+      *DERP*) echo "tailscale: relayed $via (transfers will be slow)" ;;
+      ?*) echo "tailscale: direct $via" ;;
+    esac
     ;;
   kill)
     (( $# )) || die "usage: caf kill <pid...>"
@@ -201,6 +224,12 @@ case $cmd in
     done
     (( $# )) || die "usage: caf run [-f] [--] <command...>"
     need_root
+    for i in "${!mirrors[@]}"; do
+      m=${mirrors[i]}
+      [[ $m == /* ]] || m=$root/$m
+      [[ -d $m ]] || die "mirror $m is not a directory"
+      mirrors[i]=$(cd "$m" && pwd)
+    done
     friend
     if [[ $busy ]] && (( ! force )); then
       show >&2
@@ -216,9 +245,10 @@ case $cmd in
     fi
 
     rsh="ssh ${ssh_opts[*]}"
-    progress=()
-    if [[ -t 2 ]]; then progress=(--info=progress2); fi
-    rsync -az --delete -e "$rsh" "${progress[@]}" "${includes[@]/#/--filter=}" "${excludes[@]/#/--filter=}" \
+    for m in "${mirrors[@]}"; do  # no --delete: a mistyped mirror= must not wipe anything on the friend
+      xfer pushed "$m" -az --mkpath -e "$rsh" "$m/" "$host:$m/"
+    done
+    xfer pushed "$root" -az --delete -e "$rsh" "${includes[@]/#/--filter=}" "${excludes[@]/#/--filter=}" \
       --filter=':- .gitignore' "$root/" "$host:$ws/"
 
     echo "caf: running on $host: $*" >&2
@@ -233,7 +263,7 @@ $RUN" <&$keep | sed -u "s/$(re "$rhome/$ws")/$(repl "$root")/g"
     kill "$keeper" 2> /dev/null || true
 
     if (( ${#pulls[@]} )); then
-      rsync -az -m -e "$rsh" --filter='+ */' "${pulls[@]/#/--filter=}" --filter='- *' "$host:$ws/" "$root/" ||
+      xfer pulled artifacts -az -m -e "$rsh" --filter='+ */' "${pulls[@]/#/--filter=}" --filter='- *' "$host:$ws/" "$root/" ||
         echo "caf: pulling artifacts failed" >&2
     fi
     exit "$rc"
