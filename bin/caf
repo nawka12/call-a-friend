@@ -246,7 +246,8 @@ case $cmd in
 
     rsh="ssh ${ssh_opts[*]}"
     for m in "${mirrors[@]}"; do  # no --delete: a mistyped mirror= must not wipe anything on the friend
-      xfer pushed "$m" -az --mkpath -e "$rsh" "$m/" "$host:$m/"
+      xfer pushed "$m" -az --mkpath -e "$rsh" "$m/" "$host:$m/" ||
+        die "couldn't push mirror $m; it needs that same absolute path, writable by you, on $host (different user there? see Mirrors in the README)"
     done
     xfer pushed "$root" -az --delete -e "$rsh" "${includes[@]/#/--filter=}" "${excludes[@]/#/--filter=}" \
       --filter=':- .gitignore' "$root/" "$host:$ws/"

@@ -63,6 +63,14 @@ pull=/out/*/dist/**
 
 If the build needs a folder outside the project, such as a toolchain beside it, add `mirror=../toolchain`. caf pushes it to the same absolute path on the friend, so hard-coded paths in build scripts keep working. Mirrors are the one exception to "transit only": they stay on the friend, and caf only adds or updates files in them, never deletes.
 
+### Mirrors
+
+A mirror needs the same absolute path on the friend, writable by the ssh user. If your username differs there (`/home/you` on the laptop, `/home/them` on the friend), the push fails before anything runs. To fix it, do one of these:
+
+- Log in as the same user: `host=you@desktop`, or `User` in `~/.ssh/config`.
+- Have root on the friend link the path once: `sudo ln -s /home/them /home/you`.
+- Keep the folder at a path that exists on both machines, such as `/opt/toolchains`.
+
 Run `caf --help` for every key.
 
 ## Commands
