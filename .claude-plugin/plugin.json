@@ -2,6 +2,8 @@
   "name": "call-a-friend",
   "version": "0.1.0",
   "description": "Run heavy builds on your other machine over SSH while you keep working on the laptop",
-  "author": { "name": "kayfa" },
+  "author": { "name": "nawka12" },
+  "repository": "https://github.com/nawka12/call-a-friend",
+  "license": "MIT",
   "keywords": ["remote-build", "ssh", "rsync", "offload"]
 }
