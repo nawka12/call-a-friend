@@ -1,0 +1,11 @@
+{
+  "name": "call-a-friend",
+  "owner": { "name": "kayfa" },
+  "plugins": [
+    {
+      "name": "call-a-friend",
+      "source": "./",
+      "description": "Run heavy builds on your other machine over SSH while you keep working on the laptop"
+    }
+  ]
+}

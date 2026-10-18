@@ -1,0 +1,7 @@
+{
+  "name": "call-a-friend",
+  "version": "0.1.0",
+  "description": "Run heavy builds on your other machine over SSH while you keep working on the laptop",
+  "author": { "name": "kayfa" },
+  "keywords": ["remote-build", "ssh", "rsync", "offload"]
+}

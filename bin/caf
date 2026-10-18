@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+# caf (call-a-friend): run a heavy command on another machine. The project is
+# copied to the friend's ~/.cache for the run, output streams back with paths
+# mapped to local ones, and the files named by pull= come back afterwards.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage: caf run [-f] [--] <command...>   push the project, run the command on the friend, pull artifacts
+       caf status                       the friend's load, free RAM and biggest processes
+       caf kill <pid...>                SIGTERM processes on the friend
+       caf clean                        delete this project's copy on the friend
+
+The project root is the nearest directory with a .caf file. The command runs
+there on the friend under bash, with its words joined the way ssh joins them.
+
+Config files hold key=value lines; '#' starts a comment.
+~/.config/call-a-friend/config:
+  host=desktop             ssh host of the friend (only read from this file)
+.caf (or the global file, as defaults):
+  pull=/out/*/dist/**      copy matching files back after the run (rsync pattern, repeatable)
+  exclude=/out/            don't push these (repeatable; .gitignore'd files are skipped too)
+  include=/common/.config  push these even if excluded or ignored (repeatable)
+  max_load=0.5             the friend is busy above this 1-minute load per core
+  min_mem_gb=8             the friend is busy with less free RAM than this
+  ttl_days=3               delete copies unused this long; copies from before a reboot always go
+
+Exit status is the command's, or 75 when the friend is busy (-f runs anyway).
+EOF
+}
+
+die() { echo "caf: $*" >&2; exit 1; }
+q() { printf "'%s'" "${1//\'/\'\\\'\'}"; }  # quote for POSIX sh
+re() { sed 's|[]\/$*.^[]|\\&|g' <<< "$1"; }  # escape for a sed regex
+repl() { sed 's|[\/&]|\\&|g' <<< "$1"; }     # escape for a sed replacement
+
+# Runs on the friend in $HOME, given $ws (may be empty) and $ttl.
+read -r -d '' PREFLIGHT <<'EOF' || true
+boot=$(cat /proc/sys/kernel/random/boot_id)
+mkdir -p .cache/call-a-friend
+for d in .cache/call-a-friend/*/; do
+  d=${d%/}
+  [ -d "$d" ] || continue
+  if [ "$(cat "$d.boot" 2>/dev/null)" != "$boot" ] || [ -n "$(find "$d.boot" -mmin +$((ttl * 1440)))" ]; then
+    rm -rf "$d" "$d.boot"
+  fi
+done
+[ -z "$ws" ] || { mkdir -p "$ws" && echo "$boot" > "$ws.boot"; }
+echo "home $HOME"
+echo "cores $(nproc)"
+echo "load $(cut -d' ' -f1 /proc/loadavg)"
+grep -E '^Mem(Total|Available):' /proc/meminfo
+echo ---
+# ponytail: ps %cpu is the lifetime average; sample /proc twice if per-process instant CPU matters
+{ ps -eo pid=,user=,pcpu=,rss=,args= --sort=-rss | head -n 5
+  ps -eo pid=,user=,pcpu=,rss=,args= --sort=-pcpu | head -n 5; } |
+  awk '!seen[$1]++ { printf "%8s  %-10s %5.1f%%  %5.1fG  ", $1, $2, $3, $4 / 1048576; $1 = $2 = $3 = $4 = ""; print substr($0, 5) }' |
+  cut -c1-160
+EOF
+
+# Runs on the friend in the project copy, given $cmd. Stdin stays open while we
+# are connected; when it closes (Ctrl-C, killed, network gone) the build is stopped.
+read -r -d '' RUN <<'EOF' || true
+exec 3<&0 2>&1
+setsid -w "$(command -v bash || echo sh)" -c "$cmd" </dev/null 3<&- &
+pid=$!
+{ cat <&3 >/dev/null; kill -TERM -"$pid"; } >/dev/null 2>&1 &
+exec 3<&-
+wait "$pid"
+EOF
+
+declare -A conf=([max_load]=0.5 [min_mem_gb]=8 [ttl_days]=3)
+includes=() excludes=() pulls=()
+
+load_conf() {  # load_conf <file> [global]
+  local k v n=0
+  while IFS='=' read -r k v || [[ -n $k ]]; do
+    n=$((n + 1))
+    k=${k//[[:space:]]/}
+    v=${v%%[[:space:]]#*}
+    v=${v#"${v%%[![:space:]]*}"}
+    v=${v%"${v##*[![:space:]]}"}
+    case $k in
+      '' | \#*) ;;
+      host) [[ ${2:-} ]] || die "$1:$n: host is only read from the global config"; conf[host]=$v ;;
+      max_load | min_mem_gb) [[ $v =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "$1:$n: $k must be a number"; conf[$k]=$v ;;
+      ttl_days) [[ $v =~ ^[0-9]+$ ]] || die "$1:$n: ttl_days must be a whole number"; conf[$k]=$v ;;
+      include) includes+=("+ $v") ;;
+      exclude) excludes+=("- $v") ;;
+      pull) pulls+=("+ $v") ;;
+      *) die "$1:$n: unknown key '$k'" ;;
+    esac
+  done < "$1"
+}
+
+remote() {  # remote <posix sh script>: runs it on the friend whatever its login shell is
+  ssh "${ssh_opts[@]}" "$host" "sh -c 'eval \"\$(echo $(printf '%s' "$1" | base64 -w0) | base64 -d)\"'"
+}
+
+friend() {  # preflight; sets rhome cores load memtotal memavail procs busy
+  local out k v
+  out=$(remote "ws=$(q "$ws") ttl=${conf[ttl_days]}
+$PREFLIGHT" < /dev/null) || die "can't reach $host"
+  while read -r k v; do
+    case $k in
+      home) rhome=$v ;; cores) cores=$v ;; load) load=$v ;;
+      MemTotal:) memtotal=${v%% *} ;; MemAvailable:) memavail=${v%% *} ;; ---) break ;;
+    esac
+  done <<< "$out"
+  procs=${out#*$'\n'---$'\n'}
+  busy=$(awk -v l="$load" -v c="$cores" -v ml="${conf[max_load]}" -v a="$memavail" -v mg="${conf[min_mem_gb]}" 'BEGIN {
+    if (l / c > ml) printf "load %s on %d cores (max %s per core); ", l, c, ml
+    if (a / 1048576 < mg) printf "%.1f GiB RAM free (want %s); ", a / 1048576, mg }')
+  busy=${busy%; }
+}
+
+show() {
+  awk -v h="$host" -v l="$load" -v c="$cores" -v t="$memtotal" -v a="$memavail" \
+    'BEGIN { printf "%s: load %s on %d cores, %.1f of %.1f GiB RAM free\n", h, l, c, a / 1048576, t / 1048576 }'
+  printf '%8s  %-10s %6s  %6s  %s\n' PID USER CPU RSS COMMAND
+  printf '%s\n' "$procs"
+}
+
+kill_pids() {
+  local p
+  for p; do [[ $p =~ ^[0-9]+$ ]] || die "not a pid: $p"; done
+  remote "kill $*" < /dev/null
+}
+
+cmd=${1:-}
+shift || true
+case $cmd in
+  run | status | kill | clean) ;;
+  -h | --help | help) usage; exit ;;
+  *) usage >&2; exit 2 ;;
+esac
+command -v rsync > /dev/null || die "rsync is needed here and on the friend"
+
+root=$PWD
+until [[ -f $root/.caf ]]; do
+  if [[ $root == / ]]; then root=; break; fi
+  root=${root%/*}
+  root=${root:-/}
+done
+cfg=${XDG_CONFIG_HOME:-$HOME/.config}/call-a-friend/config
+[[ ! -f $cfg ]] || load_conf "$cfg" global
+[[ -z $root ]] || load_conf "$root/.caf"
+host=${conf[host]:-}
+[[ $host ]] || die "set host=<ssh host> in $cfg"
+
+ws=
+if [[ $root ]]; then
+  name=${root##*/}
+  ws=.cache/call-a-friend/${name//[^A-Za-z0-9._-]/_}-$(printf '%s:%s' "$HOSTNAME" "$root" | sha256sum | cut -c1-8)
+fi
+ssh_opts=(-o ConnectTimeout=10 -o ControlMaster=auto -o "ControlPath=${XDG_RUNTIME_DIR:-/tmp}/caf-%C" -o ControlPersist=60)
+[[ -t 0 ]] || ssh_opts+=(-o BatchMode=yes)
+need_root() { [[ $root ]] || die "no .caf in $PWD or its parents; create one at the project root"; }
+
+case $cmd in
+  status)
+    friend
+    show
+    [[ -z $busy ]] || echo "busy: $busy"
+    ;;
+  kill)
+    (( $# )) || die "usage: caf kill <pid...>"
+    kill_pids "$@"
+    ;;
+  clean)
+    need_root
+    remote "rm -rf $(q "$ws") $(q "$ws.boot")" < /dev/null
+    ;;
+  run)
+    force=0
+    while [[ ${1:-} == -* ]]; do
+      case $1 in
+        -f | --force) force=1 ;;
+        --) shift; break ;;
+        *) die "unknown option $1" ;;
+      esac
+      shift
+    done
+    (( $# )) || die "usage: caf run [-f] [--] <command...>"
+    need_root
+    friend
+    if [[ $busy ]] && (( ! force )); then
+      show >&2
+      echo "caf: $host is busy: $busy" >&2
+      if [[ -t 0 && -t 2 ]]; then
+        read -rp "kill which PIDs? (Enter = run anyway, q = abort) " ans || exit 75
+        [[ $ans != q* ]] || exit 75
+        [[ -z $ans ]] || kill_pids $ans || exit 75
+      else
+        echo "caf: stop something with 'caf kill <pid>...' or rerun with -f" >&2
+        exit 75
+      fi
+    fi
+
+    rsh="ssh ${ssh_opts[*]}"
+    progress=()
+    if [[ -t 2 ]]; then progress=(--info=progress2); fi
+    rsync -az --delete -e "$rsh" "${progress[@]}" "${includes[@]/#/--filter=}" "${excludes[@]/#/--filter=}" \
+      --filter=':- .gitignore' "$root/" "$host:$ws/"
+
+    echo "caf: running on $host: $*" >&2
+    exec {keep}< <(exec sleep infinity)
+    keeper=$!
+    set +e
+    remote "cd $(q "$rhome/$ws") || exit 1
+cmd=$(q "$*")
+$RUN" <&$keep | sed -u "s/$(re "$rhome/$ws")/$(repl "$root")/g"
+    rc=${PIPESTATUS[0]}
+    set -e
+    kill "$keeper" 2> /dev/null || true
+
+    if (( ${#pulls[@]} )); then
+      rsync -az -m -e "$rsh" --filter='+ */' "${pulls[@]/#/--filter=}" --filter='- *' "$host:$ws/" "$root/" ||
+        echo "caf: pulling artifacts failed" >&2
+    fi
+    exit "$rc"
+    ;;
+esac
